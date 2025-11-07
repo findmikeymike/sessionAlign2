@@ -1,0 +1,465 @@
+Thought for 9s
+PRD — Session Align (enterprise, multi-tenant)
+
+Straight talk: this is a scheduling + matching + comms platform for music publishers and their rosters. Build it modular, multi-tenant from day one, and keep AI spend predictable. Below is the blueprint you can hand to engineers.
+
+1) Problem & Goals
+
+Problem: Publishers and labels waste hours manually coordinating writing/studio sessions across large rosters, juggling availability, fit (genre/credits/inspiration), location, and approvals.
+
+Primary goal: A secure, enterprise-grade web app that:
+
+Collects creators’ profiles + availability.
+
+Finds overlapping time windows and suggests high-quality pairings using AI.
+
+Lets publishers orchestrate sessions (assistive or full control).
+
+Provides roster networking (DMs, opt-in location), and project submission pipelines.
+
+
+
+2) Tenancy & Target Users
+
+Tenancy: Multi-tenant, each company has its own “hub” (Sony Publishing, etc.). Strict data isolation.
+
+Personas
+
+Publisher/Label Admin (primary buyer): Creates pairings, projects, submission calls, and policies.
+
+Creative (writer/producer/artist): Completes profile, sets availability, receives/sends session requests, submits audio.
+
+Company Staff (A&R, managers): Similar to Admin but scoped permissions.
+
+System Owner (your org): Global admin & support, observability, billing.
+
+3) Core Use Cases (must-have)
+
+Creator onboarding
+
+Create profile: genres (multi-tag), credits (structured), inspirations (tags/entities), skills, instruments, studio location (optional), socials/PRO IDs, contact preference.
+
+Set availability (recurring + ad-hoc), connect calendars (Google/Microsoft, optional).
+
+Availability alignment
+
+AI + deterministic engine finds overlapping time slots among creators who opted-in to write.
+
+Publisher view to scan openings and propose sessions.
+
+AI pairing suggestions
+
+Based on genre/credits/inspiration vectors, historical co-write success signals, and “do/don’t pair” rules.
+
+Cold-start handled via nearest-neighbor on tags + embeddings.
+
+Session workflow
+
+Suggest → propose → accept → scheduled (with holds/conflicts detection).
+
+Calendar invites; session chat; optional location pinned; files link.
+
+Roster networking
+
+Internal directory; opt-in location radius via Maps (“John’s studio is 1.5 miles away and free 5–10pm”).
+
+DMs (tenant-internal by default), block/mute, moderation tools.
+
+Project submission cards
+
+Publisher creates a “spot” (brief: artist/project, vibe, references, due date).
+
+Creators upload audio (MP3/WAV), auto-transcode for streaming preview, attach notes/lyrics.
+
+Review queue, status (received/shortlisted/passed), feedback.
+
+4) Functional Requirements
+4.1 Authentication & Access
+
+Tenant-aware auth. SSO (SAML/OIDC) for enterprise; email/social for creators.
+
+RBAC: Roles = TenantAdmin, Staff, Creator, Viewer.
+
+SCIM (v2) optional for auto-provisioning enterprise users (phase 2/3).
+
+Session management, MFA, device tracking, passwordless (email magic link) if allowed by tenant.
+
+4.2 Profiles & Catalog
+
+Structured credits: title, role, ISRC/ISWC (if known), links.
+
+Tags: genre (controlled vocab + freeform), inspirations (entities).
+
+Import credits via CSV or music APIs (phase 2).
+
+4.3 Availability
+
+Recurring availability (weekday/hour blocks) + overrides (one-off).
+
+Calendar sync (Google/Microsoft) read-only at first; write-back after acceptance (phase 2).
+
+Busy/free merge: internal availability never leaks across tenants.
+
+4.4 Matching
+
+Deterministic layer: Find overlapping time between N candidates; respect time zones.
+
+ML layer: Rank pairs/trios by fit score.
+
+Constraints: opt-out rules, conflict rules (prior issues), diversity of pairings, novelty vs repeat weighting.
+
+Publisher mode: auto-create suggestions per brief.
+
+4.5 Sessions
+
+Lifecycle: suggested → proposed → accepted → scheduled → done.
+
+Reminders (email/push), reschedule flow, cancellation policy by tenant.
+
+Session doc: participants, date/time, location, notes, files, chat.
+
+4.6 Messaging
+
+1:1 and session-room chat. File attachments with virus scan.
+
+Admin moderation (report, delete, mute).
+
+4.7 Location & Maps (opt-in)
+
+Creator studio address or area (coarse).
+
+Distance calc + travel time (Maps API).
+
+Privacy: show coarse radius by default; precise address only when both sides approve a session.
+
+4.8 Submission Cards
+
+Brief with audio refs (streaming links or uploaded).
+
+Audio uploads → transcode → preview player.
+
+Workflow states, reviewer assignments, comments, export shortlist.
+
+4.9 Admin/Compliance
+
+Tenant settings: branding, policies, content terms, location policy, data retention, SSO/SCIM.
+
+Audit logs (who/what/when/IP). Export (CSV/JSON).
+
+DPA, GDPR/CCPA controls (data subject export/delete).
+
+5) Non-Functional Requirements
+
+Security: SSO, MFA, RLS (row-level security), encryption at rest & in transit, least privilege, signed URLs for media, WAF.
+
+Privacy: Location opt-in, fine-grained visibility, private submissions by default.
+
+Scalability: 10k+ users per tenant, 100+ tenants, chat bursts; target p95 API < 300ms.
+
+Availability: 99.9% SLA target (phase 2/3).
+
+Observability: Structured logs, traces, metrics; per-tenant dashboards.
+
+Cost control: AI budget caps per tenant; tiered models; caching of embeddings.
+
+6) Architecture & Tech Choices (pragmatic)
+6.1 Stack (recommended)
+
+Frontend: Next.js (App Router) + TypeScript, React Query, Tailwind + shadcn/ui, Zustand for local state.
+
+Backend: Node.js + NestJS (modular, DI, guards) or FastAPI (Python). Pick one; I’d choose NestJS for strong TypeScript end-to-end types.
+
+API: GraphQL for read-heavy/typed clients OR REST+OpenAPI for simplicity. Pick REST v1 now, design for GraphQL later.
+
+DB: PostgreSQL (AWS RDS or Aurora Postgres). Single shared schema with tenant_id on every row + Postgres Row Level Security (RLS) enforced in all queries; consider table partitioning by tenant when scale increases.
+
+Cache/Queue: Redis (ElastiCache) for sessions, rate limits; SQS for background jobs.
+
+Storage: S3 (bucket with tenant-scoped prefixes) + pre-signed URLs; CloudFront for streaming audio previews.
+
+Realtime: WebSockets via Ably/Pusher (faster to ship) or API Gateway WS; store message history in DB.
+
+Search/Vector: Postgres pgvector extension for embeddings; fallback: OpenSearch if you need BM25 + vector hybrid.
+
+AI layer:
+
+Embeddings: economical text-embedding model; cache vectors.
+
+Ranking/generation: cost-tiered (use a small model for most, bigger model for “publisher mode” batch suggestions).
+
+Consider a local rules engine (jsonlogic) to combine ML score + hard constraints.
+
+Media: FFmpeg in ECS tasks or AWS MediaConvert for audio transcode to 128/192kbps MP3 + waveform JSON.
+
+Auth: Auth0 or Clerk (tenant-aware) for speed; support SAML/OIDC; SCIM later.
+
+Maps: Google Maps Platform (Distance Matrix + Maps JS) with per-tenant quotas.
+
+Email/Push: SES + SNS or Customer.io; SMS optional via Twilio.
+
+Infra: AWS, IaC via Terraform; environments: dev/stage/prod per region; feature flags via LaunchDarkly.
+
+Why this setup? Reliable, boring, scalable. Postgres RLS keeps multi-tenant sane; S3 + CloudFront handles media; NestJS gives clean modules and guards for tenant/RBAC.
+
+MASTER FRAMEWORK STACK
+
+| Layer | Recommended Tech | Why |
+| --- | --- | --- |
+| Frontend | Next.js (App Router) + TypeScript + Tailwind | SSR/ISR performance, enterprise-grade DX, rich React ecosystem. |
+| Backend API | NestJS (Node + TypeScript) | Strong modularity, DI/guards, shared language with frontend, clean multi-tenant middleware. |
+| Database | PostgreSQL (AWS RDS/Aurora) | Mature RDBMS with RLS to enforce tenant isolation. |
+| ORM | Prisma | Schema-first, type-safe client, rapid migrations, multi-tenant patterns. |
+| Auth | Auth0 or Clerk (SAML/OIDC) | Enterprise SSO/SCIM, audit trails, tenant-aware JWT hooks. |
+| Cache & Queue | Redis + BullMQ (or AWS SQS) | Fast sessions, rate limits, background AI processing. |
+| Storage | AWS S3 + CloudFront | Durable media storage, signed URLs per tenant, global delivery. |
+| Infrastructure | AWS ECS/Fargate + Terraform + CI/CD (GitHub Actions) | Reproducible infrastructure, autoscaling containers, automated deployments. |
+| AI Integration Layer | LangChainJS + OpenAI API / Bedrock / Vertex | Centralized LLM/embedding orchestration with pluggable providers and cost controls. |
+| Observability | OpenTelemetry → Datadog / New Relic | Unified traces, metrics, logs, enterprise alerting. |
+
+Implementation guardrails:
+- **Connection pooling**: Front `PostgreSQL` with PgBouncer (or RDS Proxy) to prevent tenant burst exhaustion.
+- **Queue strategy**: Decide early between managed SQS/Lambda and Redis + BullMQ; document operational trade-offs and failover plan.
+- **Infrastructure hardening**: Layer AWS IAM baselines, Terraform drift detection, and cost alerts alongside ECS/Fargate pipeline.
+- **AI service boundary**: Treat `LangChainJS` layer as dedicated NestJS module with per-tenant budget enforcement, feature flags, and telemetry hooks.
+
+7) Data Model (v1 essentials)
+
+tenants: id, name, slug, branding, plan, settings (JSONB)
+users: id, tenant_id, email, auth_provider_id, role, status
+creators: id, tenant_id, user_id (nullable if staff), display_name, bio, skills[], genres[], inspirations[], credits(JSONB), location(JSONB), is_location_opt_in, links(JSONB)
+availability_blocks: id, tenant_id, creator_id, start_ts, end_ts, recurrence_rule (RFC5545 or null), source (manual/google/msft)
+calendars: id, tenant_id, creator_id, provider, external_account_id, scopes, sync_state
+pairing_preferences: creator_id, do_not_pair_with[], preferred_genres[], notes
+sessions: id, tenant_id, title, start_ts, end_ts, location(JSONB), status, created_by, notes
+session_participants: session_id, creator_id, role, status(invited/accepted/declined)
+messages: id, tenant_id, thread_type(session|dm), thread_id, sender_user_id, body, attachments(JSONB), created_at
+projects: id, tenant_id, name, description, refs(JSONB), due_ts, visibility
+submission_cards: id, tenant_id, project_id, brief, refs(JSONB), open_ts, close_ts, reviewers[]
+submissions: id, tenant_id, card_id, creator_id, status, rating, feedback, created_at
+assets: id, tenant_id, owner_type(user|session|submission), owner_id, s3_key, media_type, duration, waveform_json, transcoded(bool)
+recommendations: id, tenant_id, candidate_ids[], reason_json, score, created_at
+audit_events: id, tenant_id, actor_user_id, type, entity, entity_id, diff_json, ip, ua, created_at
+
+Indexes: (tenant_id, …) on everything. Time-range indexes for availability & sessions. GIN on tags/JSONB. Vector index (pgvector) on creator embeddings.
+
+8) Matching & AI — design that won’t set money on fire
+8.1 Embeddings & Features
+
+Profile vector: concatenate genres, inspirations, roles, instruments, free-text bio → embed.
+
+Credit entities: extract named entities (artists, songs) → embed and tag.
+
+Availability vector: not embedded; handled deterministically.
+
+8.2 Scoring (pair score S)
+S = w_g * sim(genre_vec_A, genre_vec_B)
+  + w_i * sim(inspiration_vec_A, inspiration_vec_B)
+  + w_c * sim(credit_entity_vec_A, credit_entity_vec_B)
+  + w_h * history_bonus(A,B)
+  + w_n * novelty_bonus(A,B)
+  - w_d * do_not_pair_penalty(A,B)
+
+
+Gate by overlapping availability window ≥ min_duration and geo radius if in-person is required.
+
+8.3 Pipeline
+
+Candidate retrieval: Fast filter by tags + availability overlap window.
+
+Vector re-rank: Top-K by cosine similarity using pgvector.
+
+Rules pass: Blocklists, role complementarity (e.g., ensure at least one topliner if needed).
+
+Output suggestions with explainability (“shared influences: X, Y; 2 prior cuts; 2-hour overlap Wed 5–7pm”).
+
+Cost control:
+
+Precompute profile embeddings; recompute on profile change only.
+
+Batch suggestion jobs via SQS (off-peak).
+
+Use smaller LLM for explanations; cache results per pair for 24h.
+
+9) Security & Compliance
+
+RLS everywhere. Service layer also checks tenant_id from JWT claims.
+
+Secrets in AWS Secrets Manager; KMS for S3 SSE-KMS.
+
+Media access via short-lived signed URLs; no public buckets.
+
+File scanning (clamav or VirusTotal API) on upload.
+
+DPA, GDPR/CCPA: export/delete endpoints; data residency option (phase 3).
+
+Audit: immutable append-only table + S3 archive.
+
+10) Observability & Ops
+
+Metrics: API latency, error rate, queue depth, media transcode times, AI calls/tenant, matching success rate.
+
+Logs/Traces: OpenTelemetry → Datadog/New Relic.
+
+Feature flags for risky features (publisher “full control” mode).
+
+Backups: RDS PITR; S3 lifecycle (IA/Glacier).
+
+Runbooks for failed transcodes, stuck jobs, calendar sync errors.
+
+11) API (sample, REST v1)
+
+POST /v1/tenants/{t}/creators create/update profile
+
+POST /v1/tenants/{t}/availability add blocks
+
+GET /v1/tenants/{t}/match/suggestions?creatorId=&windowStart=&windowEnd=&inPerson= → list candidates with scores/explanations
+
+POST /v1/tenants/{t}/sessions propose/create
+
+PATCH /v1/tenants/{t}/sessions/{id} accept/decline/reschedule
+
+POST /v1/tenants/{t}/messages send DM / session message
+
+POST /v1/tenants/{t}/projects/{id}/cards create submission card
+
+POST /v1/tenants/{t}/cards/{id}/submissions upload audio (pre-signed URL dance)
+
+GET /v1/tenants/{t}/audit export logs
+
+All endpoints require tenant-scoped JWT; enforce RLS at DB.
+
+12) Build Order (ship fast, don’t paint yourself into a corner)
+
+Phase 0 — Foundations (1–2 sprints)
+
+AWS accounts, Terraform, RDS Postgres, S3, CloudFront, SES.
+
+Auth (Auth0/Clerk) tenant-aware. RBAC skeleton.
+
+Tenant scaffolding, RLS policies. Smoke tests.
+
+Phase 1 — MVP (single tenant friendly)
+
+Creator profiles, availability UI, deterministic overlap engine.
+
+Session proposal/acceptance, calendar ICS email (no provider write-back yet).
+
+Basic DMs (Ably/Pusher), file uploads, audio playback (no transcode, accept MP3 only).
+
+Admin dashboard v1.
+
+Phase 2 — Multi-tenant hardening
+
+SSO for admins, branding per tenant, audit logs, rate limits.
+
+S3 prefixes + signed URLs; virus scan; CloudFront.
+
+Observability dashboards; backup policies.
+
+Phase 3 — AI Match v1
+
+Embeddings pipeline + pgvector.
+
+Top-K re-rank + rules engine.
+
+Explanations; budget guardrails per tenant.
+
+Phase 4 — Submissions
+
+Cards/briefs, uploads + transcode, review queue, shortlist export.
+
+Phase 5 — Calendars & Maps polish
+
+Google/Microsoft calendar read sync, then write-back.
+
+Distance Matrix + opt-in studio radius; privacy controls.
+
+Phase 6 — Enterprise extras
+
+SCIM, data export/delete self-service, SOC 2 readiness (logging, access reviews), custom terms.
+
+13) UX Notes (practical)
+
+Two dashboards per tenant: Publisher vs Creator (switcher in header for staff with dual roles).
+
+Publisher “full control” toggle: When on, creators see proposed sessions as read-only until accepted; when off, creators can initiate as usual.
+
+Explainability tiles on suggestions (“Because: shared genres: Alt-Pop; past credits overlap: X; open Wed 3–6”).
+
+Privacy defaults: Obscure location until mutual acceptance; clear warnings when changing.
+
+14) Success Metrics
+
+Time from brief → scheduled session (median).
+
+Acceptance rate of AI-suggested pairings.
+
+% sessions created without human search.
+
+Submission engagement (submissions per card, shortlist rate).
+
+Uptime, p95 latency, AI spend / active creator (by tenant).
+
+15) Risks & Mitigations
+
+Data isolation bug (worst case): RLS + integration tests + canary tenants + static code checks for tenant_id.
+
+AI cost creep: per-tenant quotas, small/default models, batch jobs, caching.
+
+Calendar sync hell: start read-only; gate write-back per tenant; robust retry & conflict handling.
+
+Location privacy blowback: opt-in only; coarse default; audit every access.
+
+Media storage blowup: lifecycle to Glacier after 90 days; user-initiated cleanup.
+
+16) What to build next (after v1 is stable)
+
+Studio inventory (rooms/gear) + booking connectors.
+
+Simple consent/rights on submissions (checkbox + terms).
+
+Lightweight brief→session “campaign” automation.
+
+Analytics: pairing effectiveness, A&R heatmaps.
+
+17) Open Questions (decide fast)
+
+Do you want REST only now, or invest in GraphQL from the start?
+
+Auth vendor: Auth0 vs Clerk (both fine; Auth0 stronger on enterprise SSO/SCIM).
+
+NestJS vs FastAPI (team skillset decides; I’d stick to TS end-to-end).
+
+Minimum target for session length & overlap window (default 2 hours?).
+
+18) Addendum — Experience, Cost & Delivery Guardrails
+
+18.1 Visual & Interaction System
+
+- **Liquid glass aesthetic**: Adopt a glassmorphism palette (dark slate base, emerald accents, iridescent highlights). Define translucent layers using Tailwind `backdrop-blur`, `backdrop-saturate`, and `bg-white/xx` utilities; ensure contrast ratios ≥ WCAG AA.
+- **Component library**: Extend shadcn/ui tokens with custom glass surfaces, motion curves (200ms ease-in-out), and state elevation (hover glow, focus ring). Document in shared Figma plus `ui/` Storybook.
+- **Accessibility**: Provide high-contrast toggle, prefers-reduced-motion fallbacks, and keyboard nav specs per component.
+
+18.2 AI Usage Playbook
+
+- **Model tiers**: Default to `text-embedding-3-small` for profiles; reserve larger LLMs for publisher batch jobs with approval. Cache embeddings in Postgres `pgvector` and invalidate only on profile updates.
+- **Budgets**: Configure per-tenant monthly AI credit caps with alerting at 70/90/100%. Batch suggestions overnight when possible; throttle real-time calls via queue depth.
+- **Monitoring**: Emit metrics for call count, latency, spend per tenant. Add anomaly detection (sudden spend spikes) routed to ops.
+
+18.3 Audio UX & Limits
+
+- **Profile media**: Allow up to 3 highlight tracks per creator, MP3/WAV ≤ 20 MB each. Generate waveform JSON and 30s preview clips; display glassmorphism player with metadata.
+- **Submission uploads**: Support max 10 files per card, 100 MB each, with virus scan and transcoding to 192 kbps MP3 for streaming. Provide progress indicators, resumable uploads (S3 multipart), and retention policy (archive after 180 days unless flagged).
+- **Storage governance**: Tag assets with tenant + retention bucket; expose admin dashboard for cleanup requests.
+
+18.4 Auth Vendor Decision & Flows
+
+- **Preferred vendor**: Choose Auth0 for enterprise SSO breadth (SAML/OIDC, SCIM roadmap). Document fallback plan if vendor change required.
+- **Flow specs**: Map login/signup for Admin, Staff, Creator; include invitation emails, tenant-join approval steps, and MFA enforcement toggles per tenant. Outline magic link support for creators where tenants permit.
+
+18.5 Delivery Checklist (per phase)
+
+- **Definition of Ready**: Architecture decision records updated, feature flags defined, logging requirements captured, RLS tests planned.
+- **Phase exit criteria**: Each roadmap phase (0–6) must ship with automated tests (unit + integration), observability dashboards, and rollback runbooks validated in staging.
+- **Design sign-off**: Require UX review against glassmorphism system before release; capture variants in Storybook.
+- **Security review**: Run threat model + dependency scan before production deploy of each major phase.

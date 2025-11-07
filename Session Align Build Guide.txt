@@ -1,0 +1,849 @@
+# Session Align Build Guide
+**Date:** 2025-11-06
+
+This document provides comprehensive guidance for developers working on Session Align, a music industry collaboration platform connecting creators (artists, producers, songwriters) with publishers (labels, music supervisors, A&R).
+
+---
+
+## Table of Contents
+1. [Project Overview](#project-overview)
+2. [Technology Stack](#technology-stack)
+3. [Architecture & Design Principles](#architecture--design-principles)
+4. [Key Features](#key-features)
+5. [Critical Build Guidelines](#critical-build-guidelines)
+6. [Common Pitfalls & Solutions](#common-pitfalls--solutions)
+7. [Development Workflow](#development-workflow)
+8. [Testing Strategy](#testing-strategy)
+9. [Deployment](#deployment)
+
+---
+
+## Project Overview
+
+### What We're Building
+
+**Session Align** is a multi-tenant SaaS platform that facilitates collaboration between music creators and publishers. Think of it as a hybrid of LinkedIn (for music professionals), Calendly (for session scheduling), and SoundBetter (for opportunity matching).
+
+### Core Value Propositions
+
+**For Creators:**
+- Discover paid collaboration opportunities (sessions, sync placements, projects)
+- Manage availability and get matched with publishers
+- Submit music to curated briefs
+- Build professional network within the music industry
+
+**For Publishers:**
+- Find and vet talent for projects
+- Schedule writing camps and recording sessions
+- Manage submission pipelines for sync/licensing
+- Track creator relationships and past collaborations
+
+### User Roles
+
+1. **CREATOR**: Artists, producers, songwriters, engineers
+2. **PUBLISHER**: Labels, A&R, music supervisors, sync agents
+3. **ADMIN**: Platform administrators (full access)
+4. **STAFF**: Support/operations (limited access)
+
+---
+
+## Technology Stack
+
+### Frontend
+- **Framework**: Next.js 14.2.33 (App Router)
+- **Language**: TypeScript 5.6.3
+- **Styling**: TailwindCSS 3.4.14 + shadcn/ui components
+- **State Management**: React hooks (no Redux/Zustand needed for now)
+- **Forms**: React Hook Form 7.53.0 + Zod validation
+- **Icons**: Lucide React 0.453.0
+- **Internationalization**: next-intl 3.21.1
+
+### Backend
+- **Runtime**: Node.js (Next.js API routes)
+- **Database**: PostgreSQL 17+ (Neon serverless)
+- **ORM**: Drizzle ORM 0.35.1
+- **Authentication**: Clerk 6.18.3
+- **Logging**: Pino 9.5.0 + Logtail
+- **Error Tracking**: Sentry 8.34.0
+
+### Infrastructure
+- **Hosting**: Vercel (recommended) or self-hosted
+- **Database**: Neon (serverless Postgres with connection pooling)
+- **File Storage**: S3-compatible (for audio snippets, submissions)
+- **Email**: TBD (Resend or SendGrid)
+
+### Development Tools
+- **Package Manager**: npm
+- **Linting**: ESLint 8.57.1 with @antfu/eslint-config
+- **Testing**: Vitest 2.1.9 + Playwright 1.48.1
+- **Database Migrations**: Drizzle Kit 0.26.2
+- **Commit Conventions**: Commitizen + Commitlint
+
+---
+
+## Architecture & Design Principles
+
+### Multi-Tenancy Model
+
+**Critical**: Every piece of data is scoped to a `tenant_id`. This is NOT optional.
+
+- Each organization (label, publisher, collective) is a **tenant**
+- All queries MUST filter by `tenant_id` to prevent data leakage
+- Creators join tenants via invite codes (which are the tenant slug)
+- Publishers create their own tenant during onboarding
+
+**Example**:
+```typescript
+// ❌ WRONG - No tenant filtering
+const sessions = await db.select().from(sessionSchema);
+
+// ✅ CORRECT - Always filter by tenant
+const sessions = await db
+  .select()
+  .from(sessionSchema)
+  .where(eq(sessionSchema.tenantId, context.user.tenantId));
+```
+
+### Authentication Flow
+
+1. **Clerk handles authentication** (sign-up, sign-in, session management)
+2. **User completes onboarding** (role selection, org join/create, profile setup)
+3. **Onboarding service creates database records** (user, creator/publisher profile)
+4. **Clerk metadata is updated** with `{ role, tenantId, onboardingComplete: true }`
+5. **Middleware checks onboarding status** and redirects accordingly
+
+**Critical**: Clerk metadata MUST match database state. If they diverge, the middleware has a database fallback check.
+
+### Routing Structure
+
+```
+/[locale]/(auth)/
+  ├── onboarding/          # Onboarding flow
+  ├── creator/
+  │   ├── dashboard/       # Creator dashboard (glassmorph UI)
+  │   └── profile/         # Creator profile management
+  ├── publisher/
+  │   └── dashboard/       # Publisher dashboard
+  └── dashboard/           # Legacy stock dashboard (DO NOT USE)
+
+/[locale]/(unauth)/
+  ├── sign-in/             # Clerk sign-in
+  └── sign-up/             # Clerk sign-up
+
+/api/
+  ├── onboarding/          # Onboarding completion
+  ├── dashboard/
+  │   ├── creator/         # Creator dashboard data
+  │   └── publisher/       # Publisher dashboard data
+  ├── sessions/            # Session CRUD
+  ├── creators/            # Creator management
+  └── ...
+```
+
+**Critical Routing Rules**:
+1. **Always use locale-prefixed routes**: `/en/creator/dashboard`, NOT `/creator/dashboard`
+2. **Middleware auto-redirects** unprefixed routes to default locale (`en`)
+3. **Never redirect to `/dashboard`** - use role-specific routes (`/creator/dashboard` or `/publisher/dashboard`)
+
+### File Organization
+
+```
+src/
+├── app/                    # Next.js App Router
+│   ├── [locale]/          # Locale-based routing
+│   └── api/               # API routes
+├── components/            # Reusable UI components
+│   ├── ui/               # shadcn/ui primitives
+│   └── layout/           # Layout components
+├── features/             # Feature-based modules
+│   ├── onboarding/       # Onboarding logic
+│   ├── dashboard/        # Dashboard hooks/components
+│   ├── sessions/         # Session management
+│   └── ...
+├── libs/                 # Core utilities
+│   ├── DB.ts            # Database connection
+│   ├── auth.ts          # Auth helpers
+│   └── Logger.ts        # Logging setup
+├── models/              # Database schemas
+│   └── SessionAlign.ts  # Drizzle schema definitions
+├── middleware.ts        # Next.js middleware (auth, locale, redirects)
+└── utils/               # Utility functions
+```
+
+**Principle**: Features are self-contained modules with their own server logic, client hooks, and types.
+
+---
+
+## Key Features
+
+### 1. Onboarding Flow
+
+**Purpose**: Convert authenticated users into active creators or publishers.
+
+**Flow**:
+1. User signs up via Clerk
+2. Redirected to `/onboarding`
+3. Selects role (CREATOR or PUBLISHER)
+4. **CREATOR**: Must join existing org via invite code (tenant slug)
+5. **PUBLISHER**: Creates new org or joins existing
+6. Fills out profile (display name, bio, company, etc.)
+7. Backend creates `user`, `creator`/`publisher`, and updates Clerk metadata
+8. Redirected to role-specific dashboard
+
+**Critical Files**:
+- `src/app/[locale]/(auth)/onboarding/page.tsx` - Client UI
+- `src/features/onboarding/server/onboarding-service.ts` - Server logic
+- `src/app/api/onboarding/route.ts` - API endpoint
+
+**Known Issues**:
+- Clerk metadata can be stale after onboarding
+- Middleware has database fallback to check `user.tenant_id`
+- Must use `window.location.href` for hard redirects (Next.js router can fail)
+
+### 2. Creator Dashboard
+
+**Purpose**: Glassmorph UI showing opportunities, sessions, and availability.
+
+**Features**:
+- Active sessions with participant count
+- Available opportunities (projects seeking submissions)
+- Availability calendar
+- Quick actions (upload audio, find collaborators)
+
+**Critical Files**:
+- `src/app/[locale]/creator/dashboard/page.tsx` - Dashboard UI
+- `src/features/dashboard/useCreatorDashboardData.ts` - Data fetching hook
+- `src/app/api/dashboard/creator/route.ts` - API endpoint
+
+**Data Flow**:
+1. Hook calls `/api/dashboard/creator`
+2. API fetches sessions, projects, submissions from database
+3. Data is transformed and returned
+4. Hook manages loading/error states and fallback data
+
+**Critical**: If API returns empty arrays, hook falls back to sample data. This is intentional for demo purposes but should be removed in production.
+
+### 3. Session Management
+
+**Purpose**: Schedule and manage collaborative music sessions.
+
+**Lifecycle**:
+1. Publisher creates session with details (title, time, location, max participants)
+2. Creators are invited (status: `INVITED`)
+3. Creators accept/decline (status: `ACCEPTED`/`DECLINED`)
+4. Session progresses: `SUGGESTED` → `PROPOSED` → `ACCEPTED` → `SCHEDULED` → `COMPLETED`
+5. Messages can be exchanged within session context
+
+**Critical Files**:
+- `src/features/sessions/server/session-service.ts` - Business logic
+- `src/app/api/sessions/route.ts` - CRUD endpoints
+
+**Key Concepts**:
+- **Session Participant**: Join table linking creators to sessions
+- **Availability Matching**: Query creators available during session time
+- **Session Chat**: Messages scoped to `session_id`
+
+### 4. Project Submissions
+
+**Purpose**: Publishers post briefs, creators submit tracks.
+
+**Flow**:
+1. Publisher creates **project** (e.g., "TV Sync Campaign")
+2. Publisher creates **submission cards** within project (e.g., "Upbeat Pop Track")
+3. Creators browse active cards and submit tracks
+4. Publisher reviews submissions, assigns ratings, provides feedback
+5. Submissions move through pipeline: `RECEIVED` → `SHORTLISTED` → `ACCEPTED`/`REJECTED`
+
+**Critical Files**:
+- `src/features/projects/` (TBD - not fully implemented yet)
+- Database tables: `project`, `submission_card`, `submission`
+
+**Key Concepts**:
+- **Submission Card**: Specific brief within a project
+- **One submission per card per creator**: Enforced by unique constraint
+- **Reference tracks**: Stored in `refs` JSONB field
+
+### 5. Availability Management
+
+**Purpose**: Creators set availability windows for session matching.
+
+**Features**:
+- Manual availability blocks (start time, end time)
+- Recurring availability (RFC5545 recurrence rules)
+- Calendar sync (future: Google Calendar, Outlook)
+
+**Critical Files**:
+- Database table: `availability`
+- API routes: TBD (not fully implemented yet)
+
+**Matching Logic**:
+```sql
+SELECT c.* 
+FROM creator c
+JOIN availability a ON a.creator_id = c.id
+WHERE a.start_time <= :sessionStart
+  AND a.end_time >= :sessionEnd
+  AND a.is_active = true;
+```
+
+---
+
+## Critical Build Guidelines
+
+### 1. NEVER Use `node:` Prefix for Imports
+
+**Issue**: Webpack in Next.js doesn't handle `node:crypto`, `node:fs`, etc.
+
+```typescript
+// ❌ WRONG
+import { randomUUID } from 'node:crypto';
+
+// ✅ CORRECT
+import { randomUUID } from 'crypto';
+```
+
+**Why**: The `node:` prefix is a Node.js 16+ feature that Webpack doesn't recognize. Always use the standard import path.
+
+### 2. Always Prefix Routes with Locale
+
+**Issue**: Routes without locale prefix hit legacy/stock pages.
+
+```typescript
+// ❌ WRONG
+window.location.href = '/creator/dashboard';
+
+// ✅ CORRECT
+window.location.href = `/${locale}/creator/dashboard`;
+```
+
+**Why**: Next-Intl requires locale prefixes for routing. The middleware auto-redirects unprefixed routes, but it's better to be explicit.
+
+### 3. Clerk Metadata Must Match Database
+
+**Issue**: Onboarding updates database but Clerk metadata can lag.
+
+**Solution**: Middleware has a database fallback:
+```typescript
+// Check Clerk metadata first
+let onboardingComplete = Boolean(publicMetadata.onboardingComplete);
+
+// Fallback to database if Clerk is stale
+if (!onboardingComplete && userId) {
+  const dbUser = await db.select().from(userSchema).where(eq(userSchema.id, userId));
+  if (dbUser[0]?.tenantId) {
+    onboardingComplete = true;
+  }
+}
+```
+
+**Best Practice**: After onboarding, force Clerk to reload:
+```typescript
+await user?.reload();
+```
+
+### 4. Use Hard Redirects for Post-Auth Navigation
+
+**Issue**: Next.js `router.push()` can fail after authentication state changes.
+
+```typescript
+// ❌ UNRELIABLE
+router.push('/creator/dashboard');
+
+// ✅ RELIABLE
+window.location.href = '/en/creator/dashboard';
+```
+
+**Why**: Clerk's session updates can cause Next.js router to get stuck. Hard redirects force a full page reload.
+
+### 5. Always Filter by Tenant ID
+
+**Critical**: Every database query MUST filter by `tenant_id` to prevent data leakage.
+
+```typescript
+// ❌ SECURITY RISK
+const sessions = await db.select().from(sessionSchema);
+
+// ✅ SECURE
+const sessions = await db
+  .select()
+  .from(sessionSchema)
+  .where(eq(sessionSchema.tenantId, context.user.tenantId));
+```
+
+**Enforcement**: Use `getUserContext()` helper to get authenticated user + tenant:
+```typescript
+const context = await getUserContext();
+if (!context) {
+  return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+}
+
+// context.user.tenantId is guaranteed to exist
+const sessions = await db
+  .select()
+  .from(sessionSchema)
+  .where(eq(sessionSchema.tenantId, context.user.tenantId));
+```
+
+### 6. Use Drizzle ORM, Not Raw SQL
+
+**Principle**: Type safety and SQL injection prevention.
+
+```typescript
+// ❌ AVOID (unless absolutely necessary)
+const result = await db.execute(sql`SELECT * FROM session WHERE id = ${id}`);
+
+// ✅ PREFERRED
+const result = await db
+  .select()
+  .from(sessionSchema)
+  .where(eq(sessionSchema.id, id));
+```
+
+**Why**: Drizzle provides type safety, auto-completion, and prevents SQL injection.
+
+### 7. Log Everything (But Smartly)
+
+**Principle**: Comprehensive logging for debugging, but avoid PII.
+
+```typescript
+// ✅ GOOD
+logger.info({
+  event: 'session.created',
+  sessionId: session.id,
+  tenantId: context.user.tenantId,
+  creatorCount: participants.length,
+});
+
+// ❌ BAD (PII exposure)
+logger.info({
+  event: 'session.created',
+  userEmail: user.email,
+  userPhone: user.phone,
+});
+```
+
+**Log Levels**:
+- `debug`: Development-only details
+- `info`: Normal operations (session created, user logged in)
+- `warn`: Recoverable issues (Clerk metadata stale, API retry)
+- `error`: Failures (database error, API 500)
+
+### 8. Handle Errors Gracefully
+
+**Principle**: Never expose internal errors to users.
+
+```typescript
+// ❌ WRONG
+catch (error) {
+  return NextResponse.json({ error: error.message }, { status: 500 });
+}
+
+// ✅ CORRECT
+catch (error) {
+  logger.error({
+    event: 'session.create.failed',
+    error: error instanceof Error ? error.message : error,
+    tenantId: context.user.tenantId,
+  });
+  
+  return NextResponse.json(
+    { error: 'Failed to create session. Please try again.' },
+    { status: 500 }
+  );
+}
+```
+
+**Why**: Error messages can leak implementation details or sensitive data.
+
+### 9. Use Zod for Validation
+
+**Principle**: Validate all API inputs with Zod schemas.
+
+```typescript
+const createSessionSchema = z.object({
+  title: z.string().min(1).max(160),
+  startTime: z.string().datetime(),
+  endTime: z.string().datetime(),
+  maxParticipants: z.number().int().min(2).max(50).optional(),
+});
+
+export async function POST(request: NextRequest) {
+  const body = await request.json();
+  const parsed = createSessionSchema.parse(body); // Throws if invalid
+  
+  // ... use parsed data
+}
+```
+
+**Why**: Prevents invalid data from reaching the database and provides clear error messages.
+
+### 10. Keep Features Modular
+
+**Principle**: Features should be self-contained with minimal cross-dependencies.
+
+```
+src/features/sessions/
+├── server/
+│   └── session-service.ts    # Business logic
+├── client/
+│   └── useSessionData.ts     # Client hooks
+├── types.ts                  # Shared types
+└── index.ts                  # Public exports
+```
+
+**Why**: Makes code easier to test, refactor, and reason about.
+
+---
+
+## Common Pitfalls & Solutions
+
+### Pitfall 1: Infinite Redirect Loops
+
+**Symptom**: User gets stuck redirecting between `/sign-in` and `/onboarding`.
+
+**Cause**: Middleware checks `onboardingComplete` but Clerk metadata is stale.
+
+**Solution**: Middleware now has database fallback. If issue persists, clear cookies and re-authenticate.
+
+### Pitfall 2: Stock Dashboard Shows Instead of Custom Dashboard
+
+**Symptom**: After onboarding, user sees generic SaaS dashboard instead of glassmorph creator dashboard.
+
+**Cause**: Redirect went to `/creator/dashboard` (no locale) which hits legacy route.
+
+**Solution**: Always use locale-prefixed routes: `/${locale}/creator/dashboard`.
+
+### Pitfall 3: Database Connection Errors in Middleware
+
+**Symptom**: 500 errors with "Cannot read properties of undefined" in middleware.
+
+**Cause**: Importing database in middleware can cause issues with edge runtime.
+
+**Solution**: Use dynamic imports in middleware:
+```typescript
+const { db } = await import('@/libs/DB');
+const { userSchema } = await import('@/models/SessionAlign');
+```
+
+### Pitfall 4: Clerk Metadata Not Updating
+
+**Symptom**: User completes onboarding but `publicMetadata` is still empty.
+
+**Cause**: Clerk API call failed silently or session wasn't reloaded.
+
+**Solution**: 
+1. Check server logs for `onboarding.clerk.metadata.failed`
+2. Force reload: `await user?.reload()`
+3. Use database fallback in middleware
+
+### Pitfall 5: Tenant Data Leakage
+
+**Symptom**: User sees data from other organizations.
+
+**Cause**: Query didn't filter by `tenant_id`.
+
+**Solution**: ALWAYS use `getUserContext()` and filter by `context.user.tenantId`. Add integration tests to verify.
+
+### Pitfall 6: Build Fails with "node:crypto" Error
+
+**Symptom**: Webpack error about unhandled scheme.
+
+**Cause**: Using `node:` prefix in imports.
+
+**Solution**: Remove `node:` prefix from all imports:
+```bash
+# Find all instances
+grep -r "from 'node:" src/
+
+# Replace manually or with sed
+```
+
+---
+
+## Development Workflow
+
+### Initial Setup
+
+1. **Clone and Install**:
+```bash
+git clone <repo-url>
+cd session-align-app
+npm install
+```
+
+2. **Environment Variables**:
+```env
+# .env.local
+DATABASE_URL=postgresql://user:password@host:5432/database?sslmode=require
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_...
+CLERK_SECRET_KEY=sk_test_...
+```
+
+3. **Database Setup**:
+```bash
+# Generate migration
+npm run db:generate
+
+# Run migration
+npm run db:migrate
+
+# (Optional) Open Drizzle Studio
+npm run db:studio
+```
+
+4. **Run Dev Server**:
+```bash
+npm run dev
+# Server runs on http://localhost:3000
+```
+
+### Making Changes
+
+1. **Create Feature Branch**:
+```bash
+git checkout -b feature/session-chat
+```
+
+2. **Write Code**:
+- Follow existing patterns in `src/features/`
+- Add types in `types.ts`
+- Write tests in `*.test.ts`
+
+3. **Test Locally**:
+```bash
+# Type check
+npm run check-types
+
+# Lint
+npm run lint
+
+# Unit tests
+npm run test
+
+# E2E tests
+npm run test:e2e
+```
+
+4. **Commit**:
+```bash
+# Use commitizen for conventional commits
+npm run commit
+```
+
+5. **Push and PR**:
+```bash
+git push origin feature/session-chat
+# Create PR on GitHub
+```
+
+### Database Changes
+
+1. **Modify Schema**:
+Edit `src/models/SessionAlign.ts`
+
+2. **Generate Migration**:
+```bash
+npm run db:generate
+```
+
+3. **Review Migration**:
+Check `migrations/` folder for generated SQL
+
+4. **Run Migration**:
+```bash
+npm run db:migrate
+```
+
+5. **Update Types**:
+TypeScript types are auto-generated from schema
+
+---
+
+## Testing Strategy
+
+### Unit Tests (Vitest)
+
+**Location**: `src/**/*.test.ts`
+
+**What to Test**:
+- Business logic in `features/*/server/`
+- Utility functions in `utils/`
+- Validation schemas
+
+**Example**:
+```typescript
+import { describe, it, expect } from 'vitest';
+import { sanitiseSlug } from './onboarding-service';
+
+describe('sanitiseSlug', () => {
+  it('converts to lowercase', () => {
+    expect(sanitiseSlug('Magic-Co')).toBe('magic-co');
+  });
+
+  it('removes special characters', () => {
+    expect(sanitiseSlug('Magic@Co!')).toBe('magic-co');
+  });
+});
+```
+
+### Integration Tests (Playwright)
+
+**Location**: `tests/e2e/`
+
+**What to Test**:
+- Onboarding flow (sign-up → role selection → dashboard)
+- Session creation and invitation
+- Submission flow
+
+**Example**:
+```typescript
+import { test, expect } from '@playwright/test';
+
+test('creator onboarding flow', async ({ page }) => {
+  await page.goto('/sign-up');
+  
+  // Fill Clerk sign-up form
+  await page.fill('input[name="emailAddress"]', 'test@example.com');
+  await page.fill('input[name="password"]', 'TestPassword123!');
+  await page.click('button[type="submit"]');
+  
+  // Should redirect to onboarding
+  await expect(page).toHaveURL(/\/onboarding/);
+  
+  // Select CREATOR role
+  await page.click('input[value="CREATOR"]');
+  await page.click('button:has-text("Continue")');
+  
+  // Enter invite code
+  await page.fill('input[name="inviteCode"]', 'magic-co');
+  await page.click('button:has-text("Continue")');
+  
+  // Fill profile
+  await page.fill('input[name="displayName"]', 'Test Creator');
+  await page.fill('textarea[name="bio"]', 'Test bio');
+  await page.click('button:has-text("Complete")');
+  
+  // Should redirect to creator dashboard
+  await expect(page).toHaveURL(/\/creator\/dashboard/);
+});
+```
+
+### Manual Testing Checklist
+
+Before deploying:
+- [ ] Sign up as CREATOR and complete onboarding
+- [ ] Sign up as PUBLISHER and create organization
+- [ ] Create a session as PUBLISHER
+- [ ] Invite a CREATOR to session
+- [ ] Accept session as CREATOR
+- [ ] Create a project with submission card
+- [ ] Submit track as CREATOR
+- [ ] Review submission as PUBLISHER
+- [ ] Check notifications work
+- [ ] Verify no data leakage between tenants
+
+---
+
+## Deployment
+
+### Environment Variables (Production)
+
+```env
+# Database
+DATABASE_URL=postgresql://...
+
+# Clerk
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_live_...
+CLERK_SECRET_KEY=sk_live_...
+
+# Sentry
+SENTRY_DSN=https://...
+SENTRY_AUTH_TOKEN=...
+
+# Logging
+LOGTAIL_SOURCE_TOKEN=...
+
+# S3 (for file uploads)
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
+AWS_S3_BUCKET=session-align-uploads
+```
+
+### Vercel Deployment
+
+1. **Connect Repository**:
+- Link GitHub repo to Vercel project
+
+2. **Configure Build**:
+```json
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": ".next",
+  "installCommand": "npm install"
+}
+```
+
+3. **Add Environment Variables**:
+- Copy from `.env.local` to Vercel dashboard
+
+4. **Deploy**:
+```bash
+git push origin main
+# Vercel auto-deploys
+```
+
+### Database Migrations (Production)
+
+**Critical**: Run migrations BEFORE deploying new code.
+
+```bash
+# SSH into production or use Neon SQL editor
+psql $DATABASE_URL < migrations/0001_migration.sql
+```
+
+**Why**: New code may depend on schema changes. Deploy schema first, then code.
+
+---
+
+## Key Things to Remember
+
+1. **Multi-tenancy is non-negotiable**: Every query MUST filter by `tenant_id`
+2. **Clerk metadata can be stale**: Always have database fallback
+3. **Use locale-prefixed routes**: `/en/creator/dashboard`, not `/creator/dashboard`
+4. **No `node:` imports**: Use `crypto`, not `node:crypto`
+5. **Hard redirects after auth**: Use `window.location.href`, not `router.push()`
+6. **Log everything**: But avoid PII
+7. **Validate all inputs**: Use Zod schemas
+8. **Test multi-tenant isolation**: Ensure no data leakage
+9. **Keep features modular**: Self-contained modules in `src/features/`
+10. **Database first, code second**: Run migrations before deploying
+
+---
+
+## Getting Help
+
+### Documentation
+- **Database Schema**: `docs/DATABASE.md`
+- **API Routes**: Check `src/app/api/` for endpoint implementations
+- **Component Library**: shadcn/ui docs at https://ui.shadcn.com
+
+### Common Issues
+- **Redirect loops**: Check middleware logs and Clerk metadata
+- **Database errors**: Verify `tenant_id` filtering
+- **Build failures**: Check for `node:` imports
+- **Styling issues**: Ensure TailwindCSS classes are valid
+
+### Code Review Checklist
+- [ ] All queries filter by `tenant_id`
+- [ ] No `node:` imports
+- [ ] Locale-prefixed routes
+- [ ] Zod validation on API inputs
+- [ ] Error handling with user-friendly messages
+- [ ] Logging with event names
+- [ ] Tests for new features
+- [ ] No PII in logs
+
+---
+
+**End of Build Guide**
